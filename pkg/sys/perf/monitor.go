@@ -165,6 +165,12 @@ const (
 	eventTypeTracepoint int = iota
 	eventTypeKprobe
 	eventTypeUprobe
+
+	eventTypeHardware      // PERF_TYPE_HARDWARE
+	eventTypeSoftware      // PERF_TYPE_SOFTWARE
+	eventTypeHardwareCache // PERF_TYPE_HW_CACHE
+	eventTypeRaw           // PERF_TYPE_RAW
+	eventTypeBreakpoint    // PERF_TYPE_BREAKPOINT
 )
 
 type registeredEvent struct {
@@ -256,17 +262,21 @@ type EventMonitor struct {
 
 func fixupEventAttr(eventAttr *EventAttr) {
 	// Adjust certain fields in eventAttr that must be set a certain way
-	eventAttr.Type = PERF_TYPE_TRACEPOINT
-	eventAttr.Size = sizeofPerfEventAttr
-	eventAttr.SamplePeriod = 1 // SampleFreq not used
 	eventAttr.SampleType |= PERF_SAMPLE_STREAM_ID | PERF_SAMPLE_IDENTIFIER | PERF_SAMPLE_TIME
+	eventAttr.ReadFormat = 0
+	eventAttr.UseClockID = false // We do our own clock management
 
-	eventAttr.Disabled = true
-	eventAttr.Pinned = false
-	eventAttr.Freq = false
-	eventAttr.Watermark = true
-	eventAttr.UseClockID = false
-	eventAttr.WakeupWatermark = 1 // WakeupEvents not used
+	// Sanity checks
+	if eventAttr.Freq && eventAttr.SampleFreq == 0 {
+		eventAttr.SampleFreq = 1
+	} else if !eventAttr.Freq && eventAttr.SamplePeriod == 0 {
+		eventAttr.SamplePeriod = 1
+	}
+	if eventAttr.Watermark && eventAttr.WakeupWatermark == 0 {
+		eventAttr.WakeupWatermark = 1
+	} else if !eventAttr.Watermark && eventAttr.WakeupEvents == 0 {
+		eventAttr.WakeupEvents = 1
+	}
 }
 
 func (monitor *EventMonitor) writeTraceCommand(name string, cmd string) error {
@@ -371,27 +381,36 @@ func (monitor *EventMonitor) perfEventOpen(eventAttr *EventAttr, filter string) 
 	return newfds, nil
 }
 
-// This should be called with monitor.lock held.
-func (monitor *EventMonitor) newRegisteredEvent(name string, fn TraceEventDecoderFn, opts registerEventOptions, eventType int) (uint64, error) {
-	id, err := monitor.decoders.AddDecoder(name, fn)
-	if err != nil {
-		return 0, err
-	}
+func (monitor *EventMonitor) newRegisteredEvent(name string, config uint64, opts registerEventOptions, eventType int) (uint64, error) {
+	// This should be called with monitor.lock held.
 
 	var attr EventAttr
-
 	if opts.eventAttr == nil {
 		attr = monitor.defaultAttr
 	} else {
 		attr = *opts.eventAttr
 		fixupEventAttr(&attr)
 	}
-	attr.Config = uint64(id)
+	attr.Config = config
 	attr.Disabled = opts.disabled
+
+	switch eventType {
+	case eventTypeHardware:
+		attr.Type = PERF_TYPE_HARDWARE
+	case eventTypeSoftware:
+		attr.Type = PERF_TYPE_SOFTWARE
+	case eventTypeTracepoint, eventTypeKprobe, eventTypeUprobe:
+		attr.Type = PERF_TYPE_TRACEPOINT
+	case eventTypeHardwareCache:
+		attr.Type = PERF_TYPE_HW_CACHE
+	case eventTypeRaw:
+		attr.Type = PERF_TYPE_RAW
+	case eventTypeBreakpoint:
+		attr.Type = PERF_TYPE_BREAKPOINT
+	}
 
 	newfds, err := monitor.perfEventOpen(&attr, opts.filter)
 	if err != nil {
-		monitor.decoders.RemoveDecoder(name)
 		return 0, err
 	}
 
@@ -408,7 +427,6 @@ func (monitor *EventMonitor) newRegisteredEvent(name string, fn TraceEventDecode
 				unix.Close(fd)
 				delete(monitor.eventids, fd)
 			}
-			monitor.decoders.RemoveDecoder(name)
 			return 0, err
 		}
 		eventAttrMap[uint64(streamid)] = &attr
@@ -439,6 +457,97 @@ func (monitor *EventMonitor) newRegisteredEvent(name string, fn TraceEventDecode
 	return eventid, nil
 }
 
+// RegisterBreakpointEvent is used to register a breakpoint event with an
+// EventMonitor. This corresponds to the low-level PERF_TYPE_BREAKPOINT event
+// type.
+func (monitor *EventMonitor) RegisterBreakpointEvent(config uint64, options ...RegisterEventOption) (uint64, error) {
+	opts := registerEventOptions{}
+	for _, option := range options {
+		option(&opts)
+	}
+
+	monitor.lock.Lock()
+	defer monitor.lock.Unlock()
+
+	return monitor.newRegisteredEvent("", config, opts, eventTypeBreakpoint)
+}
+
+// RegisterHardwareEvent is used to register a hardware event with an
+// EventMonitor. This corresponds to the low-level PERF_TYPE_HARDWARE event
+// type.
+func (monitor *EventMonitor) RegisterHardwareEvent(config uint64, options ...RegisterEventOption) (uint64, error) {
+	opts := registerEventOptions{}
+	for _, option := range options {
+		option(&opts)
+	}
+
+	monitor.lock.Lock()
+	defer monitor.lock.Unlock()
+
+	return monitor.newRegisteredEvent("", config, opts, eventTypeHardware)
+}
+
+// RegisterHardwareCacheEvent is used to register a hardware cache event with
+// an EventMonitor. This corresponds to the low-level PERF_TYPE_HW_CACHE event
+// type.
+func (monitor *EventMonitor) RegisterHardwareCacheEvent(config uint64, options ...RegisterEventOption) (uint64, error) {
+	opts := registerEventOptions{}
+	for _, option := range options {
+		option(&opts)
+	}
+
+	monitor.lock.Lock()
+	defer monitor.lock.Unlock()
+
+	return monitor.newRegisteredEvent("", config, opts, eventTypeHardwareCache)
+}
+
+// RegisterRawEvent is used to register a hardware cache event with an
+// EventMonitor. This corresponds to the low-level PERF_TYPE_RAW event type.
+func (monitor *EventMonitor) RegisterRawEvent(config uint64, options ...RegisterEventOption) (uint64, error) {
+	opts := registerEventOptions{}
+	for _, option := range options {
+		option(&opts)
+	}
+
+	monitor.lock.Lock()
+	defer monitor.lock.Unlock()
+
+	return monitor.newRegisteredEvent("", config, opts, eventTypeRaw)
+}
+
+// RegisterSoftwareEvent is used to register a software event with an
+// EventMonitor. This corresponds to the low-level PERF_TYPE_SOFTWARE event
+// type.
+func (monitor *EventMonitor) RegisterSoftwareEvent(config uint64, options ...RegisterEventOption) (uint64, error) {
+	opts := registerEventOptions{}
+	for _, option := range options {
+		option(&opts)
+	}
+
+	monitor.lock.Lock()
+	defer monitor.lock.Unlock()
+
+	return monitor.newRegisteredEvent("", config, opts, eventTypeSoftware)
+}
+
+func (monitor *EventMonitor) newRegisteredTraceEvent(name string, fn TraceEventDecoderFn, opts registerEventOptions, eventType int) (uint64, error) {
+	// This should be called with monitor.lock held.
+
+	id, err := monitor.decoders.AddDecoder(name, fn)
+	if err != nil {
+		return 0, err
+	}
+
+	eventid, err := monitor.newRegisteredEvent(name, uint64(id), opts, eventType)
+	if err != nil {
+		monitor.decoders.RemoveDecoder(name)
+		return 0, err
+	}
+
+	return eventid, nil
+}
+
 // RegisterTracepoint is used to register a tracepoint with an EventMonitor.
 // The tracepoint is selected by name and it must exist in the running Linux
 // kernel. An event ID is returned that is unique to the EventMonitor and is
@@ -455,12 +564,7 @@ func (monitor *EventMonitor) RegisterTracepoint(name string,
 	monitor.lock.Lock()
 	defer monitor.lock.Unlock()
 
-	eventid, err := monitor.newRegisteredEvent(name, fn, opts, eventTypeTracepoint)
-	if err != nil {
-		return 0, err
-	}
-
-	return eventid, nil
+	return monitor.newRegisteredTraceEvent(name, fn, opts, eventTypeTracepoint)
 }
 
 // RegisterKprobe is used to register a kprobe with an EventMonitor. The kprobe
@@ -485,7 +589,7 @@ func (monitor *EventMonitor) RegisterKprobe(address string, onReturn bool, outpu
 		return 0, err
 	}
 
-	eventid, err := monitor.newRegisteredEvent(name, fn, opts, eventTypeKprobe)
+	eventid, err := monitor.newRegisteredTraceEvent(name, fn, opts, eventTypeKprobe)
 	if err != nil {
 		monitor.removeKprobe(name)
 		return 0, err
@@ -528,7 +632,7 @@ func (monitor *EventMonitor) RegisterUprobe(bin string, address string,
 		return 0, err
 	}
 
-	eventid, err := monitor.newRegisteredEvent(name, fn, opts, eventTypeUprobe)
+	eventid, err := monitor.newRegisteredTraceEvent(name, fn, opts, eventTypeUprobe)
 	if err != nil {
 		monitor.removeUprobe(name)
 		return 0, err
@@ -624,14 +728,15 @@ func (monitor *EventMonitor) removeRegisteredEvent(event registeredEvent) {
 
 	switch event.eventType {
 	case eventTypeTracepoint:
-		break
+		monitor.decoders.RemoveDecoder(event.name)
 	case eventTypeKprobe:
 		monitor.removeKprobe(event.name)
+		monitor.decoders.RemoveDecoder(event.name)
 	case eventTypeUprobe:
 		monitor.removeUprobe(event.name)
+		monitor.decoders.RemoveDecoder(event.name)
 	}
 
-	monitor.decoders.RemoveDecoder(event.name)
 }
 
 // UnregisterEvent is used to remove a previously registered event from an
@@ -818,8 +923,16 @@ func (monitor *EventMonitor) dispatchSortedSamples(samples decodedSampleList) {
 			// Adjust the sample time so that it
 			// matches the normalized timestamp.
 			record.Time = ds.sample.Time
-			s, err := monitor.decoders.DecodeSample(record)
-			dispatchFn(eventID, s, err)
+			if record.RawData == nil {
+				dispatchFn(eventID, record, nil)
+			} else {
+				s, err := monitor.decoders.DecodeSample(record)
+				if s == nil && err == nil {
+					dispatchFn(eventID, record, nil)
+				} else {
+					dispatchFn(eventID, s, err)
+				}
+			}
 		default:
 			dispatchFn(eventID, &ds.sample, ds.err)
 		}
@@ -1200,9 +1313,14 @@ func NewEventMonitor(options ...EventMonitorOption) (*EventMonitor, error) {
 
 	if opts.defaultEventAttr == nil {
 		eventAttr = EventAttr{
-			SampleType:  PERF_SAMPLE_TID | PERF_SAMPLE_TIME | PERF_SAMPLE_CPU | PERF_SAMPLE_RAW,
-			Inherit:     true,
-			SampleIDAll: true,
+			SamplePeriod:    1,
+			SampleType:      PERF_SAMPLE_TIME | PERF_SAMPLE_CPU | PERF_SAMPLE_RAW,
+			Disabled:        true,
+			Inherit:         true,
+			Freq:            false,
+			Watermark:       true,
+			SampleIDAll:     true,
+			WakeupWatermark: 1,
 		}
 	} else {
 		eventAttr = *opts.defaultEventAttr

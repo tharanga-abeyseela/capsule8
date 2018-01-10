@@ -52,7 +52,11 @@ type eventCounters struct {
 	LLCLoadMisses uint64
 }
 
-var cpuCounters []eventCounters
+var (
+	cpuCounters []eventCounters
+	loadsID     uint64
+	missesID    uint64
+)
 
 func main() {
 	flag.Set("logtostderr", "true")
@@ -61,73 +65,67 @@ func main() {
 	glog.Infof("Starting Capsule8 cache side channel detector")
 
 	//
-	// Create our event group to read LL cache accesses and misses
+	// Create our event monitor to read LL cache accesses and misses
 	//
 	// We ask the kernel to sample every LLCLoadSampleSize LLC
 	// loads. During each sample, the LLC load misses are also
 	// recorded, as well as CPU number, PID/TID, and sample time.
 	//
-	eventGroup := []*perf.EventAttr{}
+	monitor, err := perf.NewEventMonitor()
+	if err != nil {
+		glog.Fatalf("Could not create EventMonitor: %s", err)
+	}
 
-	ea := &perf.EventAttr{
-		Disabled: true,
-		Type:     perf.PERF_TYPE_HW_CACHE,
-		Config:   perfConfigLLCLoads,
-		SampleType: perf.PERF_SAMPLE_CPU | perf.PERF_SAMPLE_STREAM_ID |
-			perf.PERF_SAMPLE_TID | perf.PERF_SAMPLE_READ | perf.PERF_SAMPLE_TIME,
-		ReadFormat:   perf.PERF_FORMAT_GROUP | perf.PERF_FORMAT_ID,
+	loadsAttr := &perf.EventAttr{
+		SamplePeriod: LLCLoadSampleSize,
+		SampleType:   perf.PERF_SAMPLE_CPU | perf.PERF_SAMPLE_TID | perf.PERF_SAMPLE_READ,
+		Disabled:     true,
 		Pinned:       true,
 		Exclusive:    true,
-		SamplePeriod: LLCLoadSampleSize,
 		WakeupEvents: 1,
 	}
-	eventGroup = append(eventGroup, ea)
+	loadsID, err = monitor.RegisterHardwareCacheEvent(perfConfigLLCLoads,
+		perf.WithEventAttr(loadsAttr))
+	if err != nil {
+		glog.Fatalf("Could not register event for LLC loads: %s", err)
+	}
 
-	ea = &perf.EventAttr{
+	missesAttr := &perf.EventAttr{
 		Disabled: true,
-		Type:     perf.PERF_TYPE_HW_CACHE,
-		Config:   perfConfigLLCLoadMisses,
 	}
-	eventGroup = append(eventGroup, ea)
-
-	eg, err := perf.NewEventGroup(eventGroup)
+	missesID, err = monitor.RegisterHardwareCacheEvent(perfConfigLLCLoadMisses,
+		perf.WithEventAttr(missesAttr))
 	if err != nil {
-		glog.Fatal(err)
-	}
-
-	//
-	// Open the event group on all CPUs
-	//
-	err = eg.Open()
-	if err != nil {
-		glog.Fatal(err)
+		glog.Fatalf("Could not register event for LLC misses: %s", err)
 	}
 
 	// Allocate counters per CPU
 	cpuCounters = make([]eventCounters, runtime.NumCPU())
 
 	glog.Info("Monitoring for cache side channels")
-	eg.Run(func(sample perf.Sample) {
-		sr, ok := sample.Record.(*perf.SampleRecord)
-		if ok {
-			onSample(sr, eg.EventAttrsByID)
-		}
-	})
+	monitor.Run(onSample)
 }
 
-func onSample(sr *perf.SampleRecord, eventAttrMap map[uint64]*perf.EventAttr) {
-	var counters eventCounters
+func onSample(eventID uint64, sample interface{}, err error) {
+	var (
+		counters eventCounters
+		sr       *perf.SampleRecord
+	)
 
 	// The sample record contains all values in the event group,
 	// tagged with their event ID
-	for _, v := range sr.V.Values {
-		ea := eventAttrMap[v.ID]
-
-		if ea.Config == perfConfigLLCLoads {
+	if eventID == loadsID {
+		sr = sample.(*perf.SampleRecord)
+		for _, v := range sr.V.Values {
 			counters.LLCLoads = v.Value
-		} else if ea.Config == perfConfigLLCLoadMisses {
+		}
+	} else if eventID == missesID {
+		sr = sample.(*perf.SampleRecord)
+		for _, v := range sr.V.Values {
 			counters.LLCLoadMisses = v.Value
 		}
+	} else {
+		return
 	}
 
 	cpu := sr.CPU

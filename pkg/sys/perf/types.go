@@ -155,6 +155,21 @@ type EventAttr struct {
 // write serializes the EventAttr as a perf_event_attr struct compatible
 // with the kernel.
 func (ea *EventAttr) write(buf io.Writer) error {
+	// Automatically figure out ea.Size; ignore whatever is passed in.
+	if ea.UseClockID || ea.AuxWatermark > 0 || ea.SampleMaxStack > 0 {
+		ea.Size = sizeofPerfEventAttrVer5
+	} else if ea.SampleType&PERF_SAMPLE_REGS_INTR != 0 {
+		ea.Size = sizeofPerfEventAttrVer4
+	} else if ea.SampleType&(PERF_SAMPLE_REGS_USER|PERF_SAMPLE_STACK_USER) != 0 {
+		ea.Size = sizeofPerfEventAttrVer3
+	} else if ea.SampleType&PERF_SAMPLE_BRANCH_STACK != 0 {
+		ea.Size = sizeofPerfEventAttrVer2
+	} else if ea.BPType != 0 || ea.Config1 != 0 || ea.Config2 != 0 {
+		ea.Size = sizeofPerfEventAttrVer1
+	} else {
+		ea.Size = sizeofPerfEventAttrVer0
+	}
+
 	binary.Write(buf, binary.LittleEndian, ea.Type)
 	binary.Write(buf, binary.LittleEndian, ea.Size)
 	binary.Write(buf, binary.LittleEndian, ea.Config)
