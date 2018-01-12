@@ -17,6 +17,8 @@ package sensor
 import (
 	"sync"
 	"sync/atomic"
+
+	"github.com/capsule8/capsule8/pkg/expression"
 )
 
 type subscriptionUnregisterFn func(eventID uint64, sub *subscription)
@@ -24,6 +26,7 @@ type subscriptionUnregisterFn func(eventID uint64, sub *subscription)
 type subscription struct {
 	data       chan interface{}
 	unregister subscriptionUnregisterFn
+	filter     *expression.Expression
 }
 
 //

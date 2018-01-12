@@ -50,25 +50,25 @@ func newTraceEventDecoder(tracingDir, name string, fn TraceEventDecoderFn) (*tra
 	return decoder, id, err
 }
 
-func decodeDataType(dataType int, rawData []byte) (interface{}, error) {
+func decodeDataType(dataType int32, rawData []byte) (interface{}, error) {
 	switch dataType {
-	case dtString:
-		return nil, errors.New("internal error; got unexpected dtString")
-	case dtS8:
+	case TraceEventFieldTypeString:
+		return nil, errors.New("internal error; got unexpected TraceEventFieldTypeString")
+	case TraceEventFieldTypeSignedInt8:
 		return int8(rawData[0]), nil
-	case dtS16:
+	case TraceEventFieldTypeSignedInt16:
 		return int16(binary.LittleEndian.Uint16(rawData)), nil
-	case dtS32:
+	case TraceEventFieldTypeSignedInt32:
 		return int32(binary.LittleEndian.Uint32(rawData)), nil
-	case dtS64:
+	case TraceEventFieldTypeSignedInt64:
 		return int64(binary.LittleEndian.Uint64(rawData)), nil
-	case dtU8:
+	case TraceEventFieldTypeUnsignedInt8:
 		return uint8(rawData[0]), nil
-	case dtU16:
+	case TraceEventFieldTypeUnsignedInt16:
 		return binary.LittleEndian.Uint16(rawData), nil
-	case dtU32:
+	case TraceEventFieldTypeUnsignedInt32:
 		return binary.LittleEndian.Uint32(rawData), nil
-	case dtU64:
+	case TraceEventFieldTypeUnsignedInt64:
 		return binary.LittleEndian.Uint64(rawData), nil
 	}
 	return nil, errors.New("internal error; undefined dataType")
@@ -92,7 +92,7 @@ func (d *traceEventDecoder) decodeRawData(rawData []byte) (TraceEventSampleData,
 				return nil, fmt.Errorf("__data_loc size is neither 4 nor 8 (got %d)", field.dataLocSize)
 			}
 
-			if field.dataType == dtString {
+			if field.dataType == TraceEventFieldTypeString {
 				if dataLength > 0 && rawData[dataOffset+dataLength-1] == 0 {
 					dataLength--
 				}
@@ -266,18 +266,19 @@ func (m *traceEventDecoderMap) getDecoder(eventType uint16) *traceEventDecoder {
 	return dm.decoders[eventType]
 }
 
-func (m *traceEventDecoderMap) DecodeSample(sample *SampleRecord) (interface{}, error) {
+func (m *traceEventDecoderMap) DecodeSample(sample *SampleRecord) (TraceEventSampleData, interface{}, error) {
 	eventType := uint16(binary.LittleEndian.Uint64(sample.RawData))
 	decoder := m.getDecoder(eventType)
 	if decoder == nil {
 		// Not an error. There just isn't a decoder for this sample
-		return nil, nil
+		return nil, nil, nil
 	}
 
 	data, err := decoder.decodeRawData(sample.RawData)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
-	return decoder.decoderfn(sample, data)
+	decodedSample, err := decoder.decoderfn(sample, data)
+	return data, decodedSample, err
 }

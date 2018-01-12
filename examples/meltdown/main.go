@@ -67,14 +67,14 @@ func main() {
 	monitor.Run(onSample)
 }
 
-func onSample(eventID uint64, sample interface{}, err error) {
-	if err != nil {
-		glog.Fatal(err)
+func onSample(eventID uint64, sample perf.EventMonitorSample) {
+	if sample.Err != nil {
+		glog.Fatal(sample.Err)
 	}
 
-	upf := sample.(userPageFault)
+	upf := sample.DecodedSample.(userPageFault)
 
-	glog.V(10).Infof("%+v", sample)
+	glog.V(10).Infof("%+v", sample.DecodedSample)
 
 	pageFaultsByPid[upf.pid]++
 

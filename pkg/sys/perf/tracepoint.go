@@ -28,15 +28,28 @@ import (
 )
 
 const (
-	dtString int = iota
-	dtS8
-	dtS16
-	dtS32
-	dtS64
-	dtU8
-	dtU16
-	dtU32
-	dtU64
+	_ int32 = iota
+
+	// TraceEventFieldTypeString is a string.
+	TraceEventFieldTypeString
+
+	// TraceEventFieldTypeSignedInt8 is an 8-bit signed integer.
+	TraceEventFieldTypeSignedInt8
+	// TraceEventFieldTypeSignedInt16 is a 16-bit signed integer.
+	TraceEventFieldTypeSignedInt16
+	// TraceEventFieldTypeSignedInt32 is a 32-bit signed integer.
+	TraceEventFieldTypeSignedInt32
+	// TraceEventFieldTypeSignedInt64 is a 64-bit signed integer.
+	TraceEventFieldTypeSignedInt64
+
+	// TraceEventFieldTypeUnsignedInt8 is an 8-bit unsigned integer.
+	TraceEventFieldTypeUnsignedInt8
+	// TraceEventFieldTypeUnsignedInt16 is a 16-bit unsigned integer.
+	TraceEventFieldTypeUnsignedInt16
+	// TraceEventFieldTypeUnsignedInt32 is a 32-bit unsigned integer.
+	TraceEventFieldTypeUnsignedInt32
+	// TraceEventFieldTypeUnsignedInt64 is a 64-bit unsigned integer.
+	TraceEventFieldTypeUnsignedInt64
 )
 
 type traceEventField struct {
@@ -46,7 +59,7 @@ type traceEventField struct {
 	Size      int
 	IsSigned  bool
 
-	dataType     int // data type constant from above
+	dataType     int32 // data type constant from above
 	dataTypeSize int
 	dataLocSize  int
 	arraySize    int // 0 == [] array, >0 == # elements
@@ -67,27 +80,27 @@ func (field *traceEventField) setTypeFromSizeAndSign(isArray bool, arraySize int
 	switch field.dataTypeSize {
 	case 1:
 		if field.IsSigned {
-			field.dataType = dtS8
+			field.dataType = TraceEventFieldTypeSignedInt8
 		} else {
-			field.dataType = dtU8
+			field.dataType = TraceEventFieldTypeUnsignedInt8
 		}
 	case 2:
 		if field.IsSigned {
-			field.dataType = dtS16
+			field.dataType = TraceEventFieldTypeSignedInt16
 		} else {
-			field.dataType = dtU16
+			field.dataType = TraceEventFieldTypeUnsignedInt16
 		}
 	case 4:
 		if field.IsSigned {
-			field.dataType = dtS32
+			field.dataType = TraceEventFieldTypeSignedInt32
 		} else {
-			field.dataType = dtU32
+			field.dataType = TraceEventFieldTypeUnsignedInt32
 		}
 	case 8:
 		if field.IsSigned {
-			field.dataType = dtS64
+			field.dataType = TraceEventFieldTypeSignedInt64
 		} else {
-			field.dataType = dtU64
+			field.dataType = TraceEventFieldTypeUnsignedInt64
 		}
 	default:
 		// We can't figure out the type from the information given to
@@ -118,9 +131,9 @@ func (field *traceEventField) parseTypeName(s string, isArray bool, arraySize in
 		skip, err := field.setTypeFromSizeAndSign(isArray, arraySize)
 		if skip && err == nil {
 			if field.IsSigned {
-				field.dataType = dtS32
+				field.dataType = TraceEventFieldTypeSignedInt32
 			} else {
-				field.dataType = dtU32
+				field.dataType = TraceEventFieldTypeUnsignedInt32
 			}
 			field.dataTypeSize = 4
 			return false, nil
@@ -128,17 +141,17 @@ func (field *traceEventField) parseTypeName(s string, isArray bool, arraySize in
 		return skip, err
 	case "char", "signed char", "unsigned char":
 		if field.IsSigned {
-			field.dataType = dtS8
+			field.dataType = TraceEventFieldTypeSignedInt8
 		} else {
-			field.dataType = dtU8
+			field.dataType = TraceEventFieldTypeUnsignedInt8
 		}
 		field.dataTypeSize = 1
 		return false, nil
 	case "short", "signed short", "unsigned short":
 		if field.IsSigned {
-			field.dataType = dtS16
+			field.dataType = TraceEventFieldTypeSignedInt16
 		} else {
-			field.dataType = dtU16
+			field.dataType = TraceEventFieldTypeUnsignedInt16
 		}
 		field.dataTypeSize = 2
 		return false, nil
@@ -147,9 +160,9 @@ func (field *traceEventField) parseTypeName(s string, isArray bool, arraySize in
 		if skip && err == nil {
 			// Assume a 64-bit kernel
 			if field.IsSigned {
-				field.dataType = dtS64
+				field.dataType = TraceEventFieldTypeSignedInt64
 			} else {
-				field.dataType = dtU64
+				field.dataType = TraceEventFieldTypeUnsignedInt64
 			}
 			field.dataTypeSize = 8
 			return false, nil
@@ -157,61 +170,61 @@ func (field *traceEventField) parseTypeName(s string, isArray bool, arraySize in
 		return skip, err
 	case "long long", "signed long long", "unsigned long long":
 		if field.IsSigned {
-			field.dataType = dtS64
+			field.dataType = TraceEventFieldTypeSignedInt64
 		} else {
-			field.dataType = dtU64
+			field.dataType = TraceEventFieldTypeUnsignedInt64
 		}
 		field.dataTypeSize = 8
 		return false, nil
 
 	// Fixed-size types
 	case "s8", "__s8", "int8_t", "__int8_t":
-		field.dataType = dtS8
+		field.dataType = TraceEventFieldTypeSignedInt8
 		field.dataTypeSize = 1
 		return false, nil
 	case "u8", "__u8", "uint8_t", "__uint8_t":
-		field.dataType = dtS16
+		field.dataType = TraceEventFieldTypeSignedInt16
 		field.dataTypeSize = 1
 		return false, nil
 	case "s16", "__s16", "int16_t", "__int16_t":
-		field.dataType = dtS16
+		field.dataType = TraceEventFieldTypeSignedInt16
 		field.dataTypeSize = 2
 		return false, nil
 	case "u16", "__u16", "uint16_t", "__uint16_t":
-		field.dataType = dtU16
+		field.dataType = TraceEventFieldTypeUnsignedInt16
 		field.dataTypeSize = 2
 		return false, nil
 	case "s32", "__s32", "int32_t", "__int32_t":
-		field.dataType = dtS32
+		field.dataType = TraceEventFieldTypeSignedInt32
 		field.dataTypeSize = 4
 		return false, nil
 	case "u32", "__u32", "uint32_t", "__uint32_t":
-		field.dataType = dtU32
+		field.dataType = TraceEventFieldTypeUnsignedInt32
 		field.dataTypeSize = 4
 		return false, nil
 	case "s64", "__s64", "int64_t", "__int64_t":
-		field.dataType = dtS64
+		field.dataType = TraceEventFieldTypeSignedInt64
 		field.dataTypeSize = 8
 		return false, nil
 	case "u64", "__u64", "uint64_t", "__uint64_t":
-		field.dataType = dtU64
+		field.dataType = TraceEventFieldTypeUnsignedInt64
 		field.dataTypeSize = 8
 		return false, nil
 
 		/*
 			// Known kernel typedefs in 4.10
 			case "clockid_t", "pid_t", "xfs_extnum_t":
-				field.dataType = dtS32
+				field.dataType = TraceEventFieldTypeSignedInt32
 				field.dataTypeSize = 4
 			case "dev_t", "gfp_t", "gid_t", "isolate_mode_t", "tid_t", "uid_t",
 				"ext4_lblk_t",
 				"xfs_agblock_t", "xfs_agino_t", "xfs_agnumber_t", "xfs_btnum_t",
 				"xfs_dahash_t", "xfs_exntst_t", "xfs_extlen_t", "xfs_lookup_t",
 				"xfs_nlink_t", "xlog_tid_t":
-				field.dataType = dtU32
+				field.dataType = TraceEventFieldTypeUnsignedInt32
 				field.dataTypeSize = 4
 			case "loff_t", "xfs_daddr_t", "xfs_fsize_t", "xfs_lsn_t", "xfs_off_t":
-				field.dataType = dtS64
+				field.dataType = TraceEventFieldTypeSignedInt64
 				field.dataTypeSize = 8
 			case "aio_context_t", "blkcnt_t", "cap_user_data_t",
 				"cap_user_header_t", "cputime_t", "dma_addr_t", "fl_owner_t",
@@ -221,7 +234,7 @@ func (field *traceEventField) parseTypeName(s string, isArray bool, arraySize in
 				"timer_t", "umode_t",
 				"ext4_fsblk_t",
 				"xfs_ino_t", "xfs_fileoff_t", "xfs_fsblock_t", "xfs_filblks_t":
-				field.dataType = dtU64
+				field.dataType = TraceEventFieldTypeUnsignedInt64
 				field.dataTypeSize = 8
 
 			case "xen_mc_callback_fn_t":
@@ -229,7 +242,7 @@ func (field *traceEventField) parseTypeName(s string, isArray bool, arraySize in
 				return true, nil
 
 			case "uuid_be", "uuid_le":
-				field.dataType = dtU8
+				field.dataType = TraceEventFieldTypeUnsignedInt8
 				field.dataTypeSize = 1
 				field.arraySize = 16
 				return false, nil
@@ -290,7 +303,7 @@ func (field *traceEventField) parseTypeAndName(s string) (bool, error) {
 		field.TypeName = string(s)
 
 		if s == "char" {
-			field.dataType = dtString
+			field.dataType = TraceEventFieldTypeString
 			field.dataTypeSize = 1
 		} else {
 			skip, err := field.parseTypeName(s, true, -1)
@@ -402,9 +415,9 @@ func parseTraceEventField(line string) (*traceEventField, error) {
 		field.dataTypeSize = 1
 		field.arraySize = field.Size
 		if field.IsSigned {
-			field.dataType = dtS8
+			field.dataType = TraceEventFieldTypeSignedInt8
 		} else {
-			field.dataType = dtU8
+			field.dataType = TraceEventFieldTypeUnsignedInt8
 		}
 	}
 	return field, nil

@@ -192,3 +192,92 @@ func (m *safeEventAttrMap) update(emfrom eventAttrMap) {
 
 	m.active.Store(nem)
 }
+
+//
+// safeRegisteredEventMap
+// map[uint64]registeredEvent
+//
+
+type registeredEventMap map[uint64]registeredEvent
+
+func newRegisteredEventMap() registeredEventMap {
+	return make(registeredEventMap)
+}
+
+type safeRegisteredEventMap struct {
+	sync.Mutex              // used only by writers
+	active     atomic.Value // map[uint64]registeredEvent
+}
+
+func newSafeRegisteredEventMap() *safeRegisteredEventMap {
+	return &safeRegisteredEventMap{}
+}
+
+func (m *safeRegisteredEventMap) getMap() registeredEventMap {
+	value := m.active.Load()
+	if value == nil {
+		return nil
+	}
+	return value.(registeredEventMap)
+}
+
+func (m *safeRegisteredEventMap) insertInPlace(eventID uint64, event registeredEvent) {
+	em := m.getMap()
+	if em == nil {
+		em = newRegisteredEventMap()
+		m.active.Store(em)
+	}
+
+	em[eventID] = event
+}
+
+func (m *safeRegisteredEventMap) insert(eventID uint64, event registeredEvent) {
+	m.Lock()
+	defer m.Unlock()
+
+	oem := m.getMap()
+	nem := newRegisteredEventMap()
+	if oem != nil {
+		for k, v := range oem {
+			nem[k] = v
+		}
+	}
+	nem[eventID] = event
+
+	m.active.Store(nem)
+}
+
+func (m *safeRegisteredEventMap) lookup(eventID uint64) (registeredEvent, bool) {
+	em := m.getMap()
+	if em != nil {
+		e, ok := em[eventID]
+		return e, ok
+	}
+	return registeredEvent{}, false
+}
+
+func (m *safeRegisteredEventMap) removeInPlace(eventID uint64) {
+	em := m.getMap()
+	if em == nil {
+		return
+	}
+
+	delete(em, eventID)
+}
+
+func (m *safeRegisteredEventMap) remove(eventID uint64) {
+	m.Lock()
+	defer m.Unlock()
+
+	oem := m.getMap()
+	nem := newRegisteredEventMap()
+	if oem != nil {
+		for k, v := range oem {
+			if k != eventID {
+				nem[k] = v
+			}
+		}
+	}
+
+	m.active.Store(nem)
+}

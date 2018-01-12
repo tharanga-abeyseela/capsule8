@@ -174,6 +174,7 @@ type registeredEvent struct {
 	name      string
 	fds       []int
 	eventType int
+	fields    map[string]int32
 }
 
 type perfEventGroup struct {
@@ -197,10 +198,8 @@ func (group *perfEventGroup) cleanup() {
 }
 
 // SampleDispatchFn is the signature of a function called to dispatch a
-// sample. The first argument is the event ID, the second is the returned
-// value from the decoder, and the third is the error that may have been
-// returned from the decoder.
-type SampleDispatchFn func(uint64, interface{}, error)
+// sample. The first argument is the event ID, the second is the sample.
+type SampleDispatchFn func(uint64, EventMonitorSample)
 
 // EventMonitor is a high-level interface to the Linux kernel's perf_event
 // infrastructure.
@@ -212,7 +211,7 @@ type EventMonitor struct {
 	// Immutable items. No protection required. These fields are all set
 	// when the EventMonitor is created and never changed after that.
 	groups       map[int]perfEventGroup // fd : group data
-	dispatchChan chan decodedSampleList
+	dispatchChan chan eventMonitorSampleList
 
 	// Mutable by various goroutines, and also needed by the monitor
 	// goroutine. All of these are thread-safe mutable without a lock.
@@ -223,11 +222,12 @@ type EventMonitor struct {
 	eventAttrMap *safeEventAttrMap // stream id : event attr
 	eventIDMap   *safeUInt64Map    // stream id : event id
 	decoders     *traceEventDecoderMap
+	events       *safeRegisteredEventMap // event id : event
 
 	// Mutable only by the monitor goroutine while running. No protection
 	// required.
-	samples        decodedSampleList // Used while reading from ringbuffers
-	pendingSamples decodedSampleList
+	samples        eventMonitorSampleList // Used while reading from ringbuffers
+	pendingSamples eventMonitorSampleList
 
 	// Immutable once set. Only used by the .dispatchSamples() goroutine.
 	// Load once there and cache locally to avoid cache misses on this
@@ -244,9 +244,8 @@ type EventMonitor struct {
 	// Mutable by various goroutines, but not required by the monitor goroutine
 	nextEventID uint64
 	nextProbeID uint64
-	events      map[uint64]registeredEvent // event id : event
-	eventfds    map[int]int                // fd : cpu index
-	eventids    map[int]uint64             // fd : stream id
+	eventfds    map[int]int    // fd : cpu index
+	eventids    map[int]uint64 // fd : stream id
 
 	// Immutable, used only when adding new tracepoints/probes
 	defaultAttr EventAttr
@@ -432,13 +431,24 @@ func (monitor *EventMonitor) newRegisteredEvent(name string, fn TraceEventDecode
 		monitor.eventfds[fd] = i
 	}
 
+	decoder := monitor.decoders.getDecoder(id)
+	fields := make(map[string]int32, len(decoder.fields))
+	for k, v := range decoder.fields {
+		fields[k] = v.dataType
+	}
+
 	event := registeredEvent{
 		name:      name,
 		fds:       newfds,
 		eventType: eventType,
+		fields:    fields,
 	}
 
-	monitor.events[eventid] = event
+	if monitor.isRunning {
+		monitor.events.insert(eventid, event)
+	} else {
+		monitor.events.insertInPlace(eventid, event)
+	}
 	return eventid, nil
 }
 
@@ -645,11 +655,15 @@ func (monitor *EventMonitor) UnregisterEvent(eventid uint64) error {
 	monitor.lock.Lock()
 	defer monitor.lock.Unlock()
 
-	event, ok := monitor.events[eventid]
+	event, ok := monitor.events.lookup(eventid)
 	if !ok {
 		return errors.New("event is not registered")
 	}
-	delete(monitor.events, eventid)
+	if monitor.isRunning {
+		monitor.events.remove(eventid)
+	} else {
+		monitor.events.removeInPlace(eventid)
+	}
 	monitor.removeRegisteredEvent(event)
 
 	return nil
@@ -669,7 +683,7 @@ func (monitor *EventMonitor) Close(wait bool) error {
 	monitor.lock.Lock()
 	defer monitor.lock.Unlock()
 
-	for _, event := range monitor.events {
+	for _, event := range monitor.events.getMap() {
 		monitor.removeRegisteredEvent(event)
 	}
 	monitor.events = nil
@@ -709,7 +723,7 @@ func (monitor *EventMonitor) Disable(eventid uint64) {
 	monitor.lock.Lock()
 	defer monitor.lock.Unlock()
 
-	event, ok := monitor.events[eventid]
+	event, ok := monitor.events.lookup(eventid)
 	if ok {
 		for _, fd := range event.fds {
 			disable(fd)
@@ -735,7 +749,7 @@ func (monitor *EventMonitor) Enable(eventid uint64) {
 	monitor.lock.Lock()
 	defer monitor.lock.Unlock()
 
-	event, ok := monitor.events[eventid]
+	event, ok := monitor.events.lookup(eventid)
 	if ok {
 		for _, fd := range event.fds {
 			enable(fd)
@@ -759,7 +773,7 @@ func (monitor *EventMonitor) SetFilter(eventid uint64, filter string) error {
 	monitor.lock.Lock()
 	defer monitor.lock.Unlock()
 
-	event, ok := monitor.events[eventid]
+	event, ok := monitor.events.lookup(eventid)
 	if ok {
 		for _, fd := range event.fds {
 			err := setFilter(fd, filter)
@@ -779,30 +793,52 @@ func (monitor *EventMonitor) stopWithSignal() {
 	monitor.lock.Unlock()
 }
 
-type decodedSample struct {
-	sample Sample
-	err    error
+// EventMonitorSample is an encapsulation of a sample from the EventMonitor
+// interface. It contains the raw sample, decoded data, translated sample,
+// and any error that may have occurred while processing the sample.
+type EventMonitorSample struct {
+	// RawSample is the raw sample from the perf_event interface.
+	RawSample Sample
+
+	// Fields is name and type information about the fields defined for
+	// the event. Data in DecodedData will correspond to this field
+	// information.
+	Fields map[string]int32
+
+	// DecodedData is the sample data decoded from RawSample.Record.RawData
+	// if RawSample is of type *SampleRecord; otherwise, it will be nil.
+	DecodedData TraceEventSampleData
+
+	// DecodedSample is the value returned from calling the registered
+	// decoder for RawSample and DecodedData together.
+	DecodedSample interface{}
+
+	// Err will be non-nil if any occurred during processing of RawSample.
+	Err error
 }
 
-type decodedSampleList []decodedSample
+// eventMonitorSampleList implements sort.Interface and is used for sorting a
+// list of EventMonitorSample instances by time.
+type eventMonitorSampleList []EventMonitorSample
 
-func (ds decodedSampleList) Len() int {
-	return len(ds)
+func (l eventMonitorSampleList) Len() int {
+	return len(l)
 }
 
-func (ds decodedSampleList) Swap(i, j int) {
-	ds[i], ds[j] = ds[j], ds[i]
+func (l eventMonitorSampleList) Swap(i, j int) {
+	l[i], l[j] = l[j], l[i]
 }
 
-func (ds decodedSampleList) Less(i, j int) bool {
-	return ds[i].sample.Time < ds[j].sample.Time
+func (l eventMonitorSampleList) Less(i, j int) bool {
+	return l[i].RawSample.Time < l[j].RawSample.Time
 }
 
-func (monitor *EventMonitor) dispatchSortedSamples(samples decodedSampleList) {
+func (monitor *EventMonitor) dispatchSortedSamples(samples eventMonitorSampleList) {
 	dispatchFn := monitor.dispatchFn
 	eventIDMap := monitor.eventIDMap.getMap()
-	for _, ds := range samples {
-		streamID := ds.sample.SampleID.StreamID
+	eventMap := monitor.events.getMap()
+	for _, esm := range samples {
+		streamID := esm.RawSample.SampleID.StreamID
 		eventID, ok := eventIDMap[streamID]
 		if !ok {
 			// Refresh the map in case we're dealing with a newly
@@ -810,22 +846,28 @@ func (monitor *EventMonitor) dispatchSortedSamples(samples decodedSampleList) {
 			// event has been removed while we're still processing
 			// samples from the ringbuffer.
 			eventIDMap = monitor.eventIDMap.getMap()
+			eventMap = monitor.events.getMap()
 			eventID, ok = eventIDMap[streamID]
 			if !ok {
 				continue
 			}
 		}
 
-		switch record := ds.sample.Record.(type) {
+		if event, ok := eventMap[eventID]; ok {
+			esm.Fields = event.fields
+		}
+
+		switch record := esm.RawSample.Record.(type) {
 		case *SampleRecord:
 			// Adjust the sample time so that it
 			// matches the normalized timestamp.
-			record.Time = ds.sample.Time
-			s, err := monitor.decoders.DecodeSample(record)
-			dispatchFn(eventID, s, err)
-		default:
-			dispatchFn(eventID, &ds.sample, ds.err)
+			record.Time = esm.RawSample.Time
+			if esm.Err == nil {
+				esm.DecodedData, esm.DecodedSample, esm.Err =
+					monitor.decoders.DecodeSample(record)
+			}
 		}
+		dispatchFn(eventID, esm)
 	}
 }
 
@@ -853,11 +895,12 @@ func (monitor *EventMonitor) dispatchSamples() {
 }
 
 func (monitor *EventMonitor) readSamples(data []byte) {
+	attrMap := monitor.eventAttrMap.getMap()
 	reader := bytes.NewReader(data)
 	for reader.Len() > 0 {
-		ds := decodedSample{}
-		ds.err = ds.sample.read(reader, nil, monitor.eventAttrMap.getMap())
-		monitor.samples = append(monitor.samples, ds)
+		ems := EventMonitorSample{}
+		ems.Err = ems.RawSample.read(reader, nil, attrMap)
+		monitor.samples = append(monitor.samples, ems)
 	}
 }
 
@@ -880,19 +923,19 @@ func (monitor *EventMonitor) readRingBuffers(readyfds []int) {
 		group := monitor.groups[fd]
 		group.rb.read(monitor.readSamples)
 		for i := first; i < len(monitor.samples); i++ {
-			monitor.samples[i].sample.Time = group.timeBase +
-				(monitor.samples[i].sample.Time - group.timeOffset)
+			monitor.samples[i].RawSample.Time = group.timeBase +
+				(monitor.samples[i].RawSample.Time - group.timeOffset)
 		}
 
 		if first == 0 {
 			// Sometimes readyfds get no samples from the ringbuffer
 			if len(monitor.samples) > 0 {
-				lastTimestamp = monitor.samples[len(monitor.samples)-1].sample.Time
+				lastTimestamp = monitor.samples[len(monitor.samples)-1].RawSample.Time
 			}
 		} else {
 			x := len(monitor.samples)
 			for i := x - 1; i > lastIndex; i-- {
-				if monitor.samples[i].sample.Time > lastTimestamp {
+				if monitor.samples[i].RawSample.Time > lastTimestamp {
 					x--
 				}
 			}
@@ -947,7 +990,7 @@ func (monitor *EventMonitor) Run(fn SampleDispatchFn) error {
 		return err
 	}
 
-	monitor.dispatchChan = make(chan decodedSampleList,
+	monitor.dispatchChan = make(chan eventMonitorSampleList,
 		config.Sensor.ChannelBufferLength)
 	monitor.dispatchFn = fn
 
@@ -1072,9 +1115,9 @@ var referenceEventAttr = EventAttr{
 func (monitor *EventMonitor) readReferenceSamples(data []byte) {
 	reader := bytes.NewReader(data)
 	for reader.Len() > 0 {
-		ds := decodedSample{}
-		ds.err = ds.sample.read(reader, &referenceEventAttr, nil)
-		monitor.samples = append(monitor.samples, ds)
+		ems := EventMonitorSample{}
+		ems.Err = ems.RawSample.read(reader, &referenceEventAttr, nil)
+		monitor.samples = append(monitor.samples, ems)
 	}
 }
 
@@ -1112,7 +1155,7 @@ func (monitor *EventMonitor) cpuTimeOffset(cpu int, groupfd int, rb *ringBuffer)
 		if len(monitor.samples) == 0 {
 			continue
 		}
-		ds := monitor.samples[0]
+		esm := monitor.samples[0]
 
 		// Close the event to prevent any more samples from being
 		// added to the ring buffer. Remove anything from the ring
@@ -1121,11 +1164,11 @@ func (monitor *EventMonitor) cpuTimeOffset(cpu int, groupfd int, rb *ringBuffer)
 		rb.read(monitor.readReferenceSamples)
 		monitor.samples = nil
 
-		if ds.err != nil {
-			return 0, err
+		if esm.Err != nil {
+			return 0, esm.Err
 		}
 
-		return ds.sample.Time - rb.timeRunning(), nil
+		return esm.RawSample.Time - rb.timeRunning(), nil
 	}
 }
 
@@ -1299,8 +1342,8 @@ func NewEventMonitor(options ...EventMonitorOption) (*EventMonitor, error) {
 		eventAttrMap: newSafeEventAttrMap(),
 		eventIDMap:   newSafeUInt64Map(),
 		decoders:     newTraceEventDecoderMap(opts.tracingDir),
+		events:       newSafeRegisteredEventMap(),
 		nextEventID:  1,
-		events:       make(map[uint64]registeredEvent),
 		eventfds:     make(map[int]int),
 		eventids:     make(map[int]uint64),
 		defaultAttr:  eventAttr,
